@@ -40,6 +40,9 @@
   .tag { display:inline-block; font-size:12px; padding:1px 8px; border-radius:99px; background:var(--line); color:var(--muted); margin-right:6px; }
   .pin { width:26px; height:26px; border-radius:50%; background:#0a7d4f; color:#fff; border:2px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,.4); font:700 13px/22px system-ui; text-align:center; }
   .pin.hl { background:#d93025; transform:scale(1.25); }
+  .opts { display:flex; gap:20px; flex-wrap:wrap; margin:0 0 8px; }
+  .opts label { display:flex; align-items:center; gap:8px; font-size:15px; }
+  .opts input { flex:none; width:20px; height:20px; padding:0; accent-color:var(--accent); }
   #status { color:var(--muted); margin:8px 0; min-height:1.4em; }
   #note { color:var(--muted); font-size:13px; margin-top:16px; }
   .hidden { display:none; }
@@ -66,6 +69,10 @@
         <button class="ghost" id="byDest">搜尋</button>
       </div>
       <div id="sugg" class="hidden"></div>
+    </div>
+    <div class="opts">
+      <label><input type="checkbox" id="fOpen" checked> 只顯示營業中</label>
+      <label><input type="checkbox" id="fDist" checked> 依距離排序</label>
     </div>
     <div id="status"></div>
     <div id="map" class="hidden"></div>
@@ -117,7 +124,7 @@ async function textSearch(key, query, center, radius) {
   if (center) body.locationBias = { circle: { center, radius } };
   const data = await placesFetch(key, "https://places.googleapis.com/v1/places:searchText",
     { method: "POST", body: JSON.stringify(body) },
-    "places.id,places.displayName,places.location,places.formattedAddress,places.primaryTypeDisplayName,places.businessStatus");
+    "places.id,places.displayName,places.location,places.formattedAddress,places.primaryTypeDisplayName,places.businessStatus,places.currentOpeningHours.openNow,places.rating,places.userRatingCount");
   return data.places || [];
 }
 
@@ -156,9 +163,28 @@ async function findFree(key, center) {
   }
   return [...seen.values()]
     .map(p => ({ ...p, op: operatorOf(p), dist: haversine(center, p.location) }))
-    .filter(p => p.dist <= MAX_DIST_M)
-    .sort((a, b) => a.dist - b.dist)
-    .slice(0, MAX_RESULTS);
+    .filter(p => p.dist <= MAX_DIST_M);
+}
+
+// ---------- 篩選與排序（只在前端處理，切換核取方塊不會重新查詢 Google） ----------
+const isOpen = p => p.currentOpeningHours?.openNow;          // true / false / undefined（Google 沒有營業時間）
+// 評論數少的站，評分要往平均值（3.5）拉，避免只有 1～2 則 5 星的站排第一
+const score = p => ((p.rating || 0) * (p.userRatingCount || 0) + 3.5 * 10) / ((p.userRatingCount || 0) + 10);
+function applyView(all) {
+  let list = all;
+  if ($("fOpen").checked) list = list.filter(p => isOpen(p) !== false);   // 營業時間不明的先保留，卡片上會標示
+  const filteredOut = all.length - list.length;
+  list = [...list].sort($("fDist").checked
+    ? (a, b) => a.dist - b.dist
+    : (a, b) => score(b) - score(a) || a.dist - b.dist);                  // 取消距離排序 → 評分高的優先
+  return { shown: list.slice(0, MAX_RESULTS), filteredOut };
+}
+let lastResult = null;   // { center, label, all }
+function renderView() {
+  if (!lastResult) return;
+  const { center, label, all } = lastResult;
+  const { shown, filteredOut } = applyView(all);
+  render(center, shown, label, filteredOut);
 }
 
 function demoData(c) {
@@ -191,27 +217,31 @@ function drawMap(center, places) {
   });
   map.fitBounds(pts, { padding: [28, 28], maxZoom: 17 });
 }
+const openTag = p => isOpen(p) === true ? '<span class="tag">營業中</span>'
+  : isOpen(p) === false ? '<span class="tag">已打烊</span>' : '<span class="tag">營業時間不明</span>';
 function highlight(i, scroll) {
   document.querySelectorAll(".card").forEach((c, j) => c.classList.toggle("hl", i === j));
   document.querySelectorAll(".pin").forEach((c, j) => c.classList.toggle("hl", i === j));
   if (scroll) document.querySelectorAll(".card")[i]?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
-function render(center, places, label) {
+function render(center, places, label, hidden = 0) {
   const list = $("list");
   if (!places.length) {
     list.innerHTML = "";
     drawMap(center, []);
-    $("status").textContent = `${label}${MAX_DIST_M / 1000} km 內找不到嘟嘟房／聯通／24TPS 站點。`;
+    $("status").textContent = hidden
+      ? `${label}有 ${hidden} 個站，但都被篩選條件排除了（取消「只顯示營業中」可看到）。`
+      : `${label}${MAX_DIST_M / 1000} km 內找不到嘟嘟房／聯通／24TPS 站點。`;
     return;
   }
-  $("status").textContent = `${label}最近的 ${places.length} 個免費站`;
+  $("status").textContent = `${label}${$("fDist").checked ? "最近" : "評分最高"}的 ${places.length} 個免費站` + (hidden ? `（${hidden} 個未營業的已隱藏）` : "");
   list.innerHTML = places.map((p, i) => {
     const url = `https://www.google.com/maps/dir/?api=1&destination=${p.location.latitude},${p.location.longitude}&destination_place_id=${encodeURIComponent(p.id)}`;
     return `<div class="card" data-i="${i}">
       <div class="num">${i + 1}</div>
       <div class="info"><div class="name">${esc(p.displayName.text)}</div>
-        <div class="sub"><span class="tag">${esc(p.op)}</span>${CHECK_FIRST.test(p.displayName.text) ? '<span class="tag">⚠️ 需確認是否適用</span>' : ""}${esc(p.formattedAddress || "")}</div></div>
+        <div class="sub"><span class="tag">${esc(p.op)}</span>${openTag(p)}${p.rating ? `<span class="tag">⭐ ${p.rating}（${p.userRatingCount || 0}）</span>` : ""}${CHECK_FIRST.test(p.displayName.text) ? '<span class="tag">⚠️ 需確認是否適用</span>' : ""}${esc(p.formattedAddress || "")}</div></div>
       <div class="dist">${fmtDist(p.dist)}</div>
       <a class="nav" href="${url}" target="_blank" rel="noopener">導航</a></div>`;
   }).join("");
@@ -229,7 +259,8 @@ async function run(getCenter, label) {
   hideSugg();
   try {
     const center = await getCenter(key);
-    render(center, await findFree(key, center), label);
+    lastResult = { center, label, all: await findFree(key, center) };
+    renderView();
   } catch (e) {
     $("status").textContent = "失敗：" + e.message;
   }
@@ -300,6 +331,12 @@ function showApp() {
 }
 $("saveKey").onclick = () => { const v = $("key").value.trim(); if (v) { store.set("placesKey", v); showApp(); } };
 $("resetKey").onclick = () => { store.del("placesKey"); showApp(); };
+// 核取方塊的狀態記在這支手機的瀏覽器裡
+for (const id of ["fOpen", "fDist"]) {
+  const saved = store.get(id);
+  if (saved !== null) $(id).checked = saved === "1";
+  $(id).addEventListener("change", () => { store.set(id, $(id).checked ? "1" : "0"); renderView(); });
+}
 $("near").onclick = () => run(() => here(), "你附近");
 $("byDest").onclick = () => run(destCenter, "目的地附近");
 $("dest").addEventListener("input", onType);
