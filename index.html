@@ -49,6 +49,13 @@
   .opts label { display:flex; align-items:center; gap:8px; font-size:15px; }
   .opts input { flex:none; width:20px; height:20px; padding:0; accent-color:var(--accent); }
   #status { color:var(--muted); margin:8px 0; min-height:1.4em; }
+  #navbar { position:fixed; left:0; right:0; bottom:0; z-index:2000; display:flex; align-items:center; gap:10px; padding:12px 16px calc(12px + env(safe-area-inset-bottom)); background:#14532d; color:#fff; box-shadow:0 -4px 16px rgba(0,0,0,.3); }
+  #navbar .nb-text { flex:1; min-width:0; font-size:14px; line-height:1.35; }
+  #navbar .nb-text span { opacity:.8; font-size:12px; }
+  #navbar button { padding:14px 16px; border-radius:12px; font-size:16px; font-weight:700; }
+  #navbar .nb-full { background:#fbbf24; color:#1a1d21; }
+  #navbar .nb-end { background:transparent; color:#fff; border:1px solid rgba(255,255,255,.5); font-weight:400; padding:14px 12px; }
+  body.hasbar main { padding-bottom:110px; }
   #note { color:var(--muted); font-size:13px; margin-top:16px; }
   .hidden { display:none; }
 </style>
@@ -86,6 +93,7 @@
     <button class="ghost" id="resetKey" style="margin-top:8px">更換 API Key</button>
   </div>
 </main>
+<div id="navbar" class="hidden"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -182,14 +190,72 @@ function applyView(all) {
   list = [...list].sort($("fDist").checked
     ? (a, b) => a.dist - b.dist
     : (a, b) => score(b) - score(a) || a.dist - b.dist);                  // 取消距離排序 → 評分高的優先
-  return { shown: list.slice(0, MAX_RESULTS), filteredOut };
+  const full = fullMap();                                                 // 剛標記過「滿了」的站排到最後
+  list = [...list.filter(p => !full[p.id]), ...list.filter(p => full[p.id])];
+  return { shown: list.slice(0, MAX_RESULTS), sorted: list, filteredOut };
 }
 let lastResult = null;   // { center, label, all }
+let lastView = null;     // { shown, sorted } 目前畫面上的順序，備案導航用
 function renderView() {
   if (!lastResult) return;
   const { center, label, all } = lastResult;
-  const { shown, filteredOut } = applyView(all);
-  render(center, shown, label, filteredOut);
+  lastView = applyView(all);
+  render(center, lastView.shown, label, lastView.filteredOut);
+}
+
+// ---------- 備案導航：到了發現滿了 → 一鍵換下一個 ----------
+const FULL_KEY = "fullLots", NAV_KEY = "navQueue";
+const FULL_TTL = 2 * 3600e3;   // 「滿了」的標記 2 小時後自動失效（滿位是暫時的）
+const NAV_TTL = 3 * 3600e3;    // 導航狀態 3 小時後自動清除
+const readJSON = (k, fallback) => { try { return JSON.parse(store.get(k)) ?? fallback; } catch { return fallback; } };
+function fullMap() {
+  const m = readJSON(FULL_KEY, {}), now = Date.now();
+  for (const id in m) if (now - m[id] > FULL_TTL) delete m[id];
+  return m;
+}
+function markFull(id) { const m = fullMap(); m[id] = Date.now(); store.set(FULL_KEY, JSON.stringify(m)); }
+const navUrl = p => `https://www.google.com/maps/dir/?api=1&destination=${p.location.latitude},${p.location.longitude}&destination_place_id=${encodeURIComponent(p.id)}`;
+const navState = () => { const s = readJSON(NAV_KEY, null); return s && Date.now() - s.ts < NAV_TTL ? s : null; };
+const saveNav = s => store.set(NAV_KEY, JSON.stringify(s));
+const nameOf = p => p.displayName?.text || p.name;
+
+// 點某個站的「導航」：以它為第一順位，其餘照目前畫面順序排在後面當備案
+function startNav(i) {
+  if (!lastView) return;
+  const first = lastView.shown[i], full = fullMap();
+  const rest = lastView.sorted.filter(p => p.id !== first.id && !full[p.id]);
+  const queue = [first, ...rest].slice(0, 8).map(p => ({ id: p.id, name: nameOf(p), op: p.op, location: p.location }));
+  saveNav({ queue, idx: 0, ts: Date.now() });
+  renderNavBar();
+}
+function nextBackup() {
+  const s = navState(); if (!s) return;
+  markFull(s.queue[s.idx].id);
+  const full = fullMap();
+  let n = s.idx + 1;
+  while (n < s.queue.length && full[s.queue[n].id]) n++;
+  if (n >= s.queue.length) { saveNav({ ...s, idx: s.queue.length, ts: Date.now() }); }
+  else {
+    saveNav({ ...s, idx: n, ts: Date.now() });
+    window.open(navUrl({ id: s.queue[n].id, location: s.queue[n].location }), "_blank");
+  }
+  renderNavBar(); renderView();
+}
+function endNav() { store.del(NAV_KEY); renderNavBar(); }
+function renderNavBar() {
+  const s = navState(), bar = $("navbar");
+  document.body.classList.toggle("hasbar", !!s);
+  if (!s) { bar.classList.add("hidden"); return; }
+  bar.classList.remove("hidden");
+  if (s.idx >= s.queue.length) {
+    bar.innerHTML = `<div class="nb-text">附近的候選都標記滿了</div><button class="nb-end" id="nbEnd">結束</button>`;
+  } else {
+    const cur = s.queue[s.idx], left = s.queue.length - s.idx - 1;
+    bar.innerHTML = `<div class="nb-text">導航中：<b>${esc(cur.name)}</b><br><span>${s.idx + 1} / ${s.queue.length}，後面還有 ${left} 個備案</span></div>
+      <button class="nb-full" id="nbFull">滿了，換下一個</button><button class="nb-end" id="nbEnd">結束</button>`;
+  }
+  $("nbEnd").onclick = endNav;
+  if ($("nbFull")) $("nbFull").onclick = nextBackup;
 }
 
 function demoData(c) {
@@ -241,15 +307,17 @@ function render(center, places, label, hidden = 0) {
     return;
   }
   $("status").textContent = `${label}${$("fDist").checked ? "最近" : "評分最高"}的 ${places.length} 個免費站` + (hidden ? `（${hidden} 個未營業的已隱藏）` : "");
+  const full = fullMap();
   list.innerHTML = places.map((p, i) => {
-    const url = `https://www.google.com/maps/dir/?api=1&destination=${p.location.latitude},${p.location.longitude}&destination_place_id=${encodeURIComponent(p.id)}`;
+    const url = navUrl(p);
     return `<div class="card" data-i="${i}">
       <div class="num">${i + 1}</div>
       <div class="info"><div class="name">${esc(p.displayName.text)}</div>
-        <div class="sub"><span class="tag">${esc(p.op)}</span>${openTag(p)}${p.rating ? `<span class="tag">⭐ ${p.rating}（${p.userRatingCount || 0}）</span>` : ""}${CHECK_FIRST.test(p.displayName.text) ? '<span class="tag">⚠️ 需確認是否適用</span>' : ""}${esc(p.formattedAddress || "")}</div></div>
+        <div class="sub"><span class="tag">${esc(p.op)}</span>${full[p.id] ? '<span class="tag">🈵 剛標記為滿</span>' : ""}${openTag(p)}${p.rating ? `<span class="tag">⭐ ${p.rating}（${p.userRatingCount || 0}）</span>` : ""}${CHECK_FIRST.test(p.displayName.text) ? '<span class="tag">⚠️ 需確認是否適用</span>' : ""}${esc(p.formattedAddress || "")}</div></div>
       <div class="dist">${fmtDist(p.dist)}</div>
       <a class="nav" href="${url}" target="_blank" rel="noopener">導航</a></div>`;
   }).join("");
+  list.querySelectorAll("a.nav").forEach(a => a.addEventListener("click", () => startNav(+a.closest(".card").dataset.i)));
   list.querySelectorAll(".card").forEach(c => c.addEventListener("click", e => {
     if (e.target.closest("a")) return;
     const i = +c.dataset.i; highlight(i, false); map.panTo(markers[i].getLatLng());
@@ -348,6 +416,8 @@ $("dest").addEventListener("input", onType);
 $("dest").addEventListener("keydown", e => { if (e.key === "Enter") $("byDest").click(); });
 document.addEventListener("click", e => { if (!e.target.closest(".search")) hideSugg(); });
 showApp();
+renderNavBar();   // 從 Google 地圖切回來時，備案列還在
+document.addEventListener("visibilitychange", () => { if (!document.hidden) renderNavBar(); });
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});   // 讓瀏覽器可以「安裝」成 App
 </script>
 </body>
