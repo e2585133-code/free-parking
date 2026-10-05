@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>免費停車</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0a7d4f">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="免費停車">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --fg:#1a1d21; --muted:#6b7280; --accent:#0a7d4f; --line:#e5e7eb; --hl:#e8f6ef; }
@@ -343,6 +348,7 @@ $("dest").addEventListener("input", onType);
 $("dest").addEventListener("keydown", e => { if (e.key === "Enter") $("byDest").click(); });
 document.addEventListener("click", e => { if (!e.target.closest(".search")) hideSugg(); });
 showApp();
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});   // 讓瀏覽器可以「安裝」成 App
 </script>
 </body>
 </html>
