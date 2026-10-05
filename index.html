@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>免費停車</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1a1d21; --muted:#6b7280; --accent:#0a7d4f; --line:#e5e7eb; --hl:#e8f6ef; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111317; --card:#1a1d23; --fg:#e8eaed; --muted:#9aa0a6; --accent:#34c38a; --line:#2a2e36; --hl:#1d2e27; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.4 system-ui,"Noto Sans TC",sans-serif; }
+  main { max-width:520px; margin:0 auto; padding:16px; }
+  h1 { font-size:18px; margin:0 0 12px; }
+  .row { display:flex; gap:8px; margin-bottom:12px; }
+  input { flex:1; min-width:0; padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--fg); font-size:16px; }
+  button { padding:12px 16px; border:0; border-radius:10px; background:var(--accent); color:#fff; font-size:16px; font-weight:600; }
+  button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); font-weight:400; }
+  button.mic { background:var(--card); border:1px solid var(--line); padding:12px 14px; font-size:18px; }
+  button.mic.on { background:#d93025; border-color:#d93025; }
+  .go { width:100%; padding:18px; font-size:18px; margin-bottom:12px; }
+  .search { position:relative; margin-bottom:12px; }
+  .search .row { margin:0; }
+  #sugg { position:absolute; left:0; right:0; top:100%; z-index:1000; margin-top:4px; background:var(--card); border:1px solid var(--line); border-radius:10px; box-shadow:0 6px 20px rgba(0,0,0,.18); overflow:hidden; }
+  #sugg div { padding:12px; border-bottom:1px solid var(--line); cursor:pointer; }
+  #sugg div:last-child { border-bottom:0; }
+  #sugg div:active { background:var(--hl); }
+  #sugg .s2 { color:var(--muted); font-size:13px; }
+  #map { height:260px; border-radius:12px; border:1px solid var(--line); margin-bottom:12px; z-index:0; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:10px; display:flex; align-items:center; gap:12px; }
+  .card.hl { background:var(--hl); border-color:var(--accent); }
+  .num { flex:none; width:26px; height:26px; border-radius:50%; background:var(--accent); color:#fff; font-weight:700; font-size:14px; display:flex; align-items:center; justify-content:center; }
+  .card .info { flex:1; min-width:0; }
+  .name { font-weight:600; }
+  .sub { color:var(--muted); font-size:14px; }
+  .dist { font-size:20px; font-weight:700; color:var(--accent); white-space:nowrap; }
+  a.nav { text-decoration:none; background:var(--accent); color:#fff; padding:10px 14px; border-radius:10px; font-weight:600; }
+  .tag { display:inline-block; font-size:12px; padding:1px 8px; border-radius:99px; background:var(--line); color:var(--muted); margin-right:6px; }
+  .pin { width:26px; height:26px; border-radius:50%; background:#0a7d4f; color:#fff; border:2px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,.4); font:700 13px/22px system-ui; text-align:center; }
+  .pin.hl { background:#d93025; transform:scale(1.25); }
+  #status { color:var(--muted); margin:8px 0; min-height:1.4em; }
+  #note { color:var(--muted); font-size:13px; margin-top:16px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🅿️ 我的免費停車場</h1>
+
+  <div id="setup" class="hidden">
+    <p class="sub">第一次使用：貼上你的 Google Places API Key（只存在這支手機的瀏覽器裡）。</p>
+    <div class="row">
+      <input id="key" placeholder="AIza..." autocapitalize="off" autocomplete="off">
+      <button id="saveKey">儲存</button>
+    </div>
+  </div>
+
+  <div id="app" class="hidden">
+    <button class="go" id="near">找我附近的免費站</button>
+    <div class="search">
+      <div class="row">
+        <input id="dest" placeholder="輸入或說出目的地，例如 南港展覽館" autocomplete="off">
+        <button class="mic" id="mic" title="語音輸入">🎤</button>
+        <button class="ghost" id="byDest">搜尋</button>
+      </div>
+      <div id="sugg" class="hidden"></div>
+    </div>
+    <div id="status"></div>
+    <div id="map" class="hidden"></div>
+    <div id="list"></div>
+    <p id="note">只列出店名含「嘟嘟房／台灣聯通／24TPS」的汽車場站。車麻吉場站請另用車麻吉 App 查。</p>
+    <button class="ghost" id="resetKey" style="margin-top:8px">更換 API Key</button>
+  </div>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// 24TPS 店名有多種寫法：「24TPS永固便利停車場-X」「24TPS永固便利(X站)」「永固便利停車。X站」
+const OPERATORS = [
+  { label: "嘟嘟房",   re: /嘟嘟房/, queries: ["嘟嘟房 停車場"] },
+  { label: "台灣聯通", re: /台灣聯通/, queries: ["台灣聯通 停車場"] },
+  { label: "24TPS",    re: /24TPS|永固便利|永固.{0,3}停車/i, queries: ["24TPS 停車場", "永固便利 停車場"] },
+];
+const NOT_A_LOT = /股份有限公司|電池/;           // 公司本部、同名但不是停車場
+const CHECK_FIRST = /加盟|特約|短期|貨運/;        // 優惠是否適用不確定，顯示提醒
+const RADIUS_M = 3000;
+const MAX_DIST_M = 5000;                          // locationBias 只是偏好，不是限制，要自己裁掉太遠的
+const MAX_RESULTS = 6;
+
+const $ = id => document.getElementById(id);
+const store = {
+  get: k => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
+  del: k => { try { localStorage.removeItem(k); } catch {} },
+};
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmtDist = m => m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(1)} km`;
+
+function haversine(a, b) {
+  const R = 6371000, rad = x => x * Math.PI / 180;
+  const dLat = rad(b.latitude - a.latitude), dLng = rad(b.longitude - a.longitude);
+  const h = Math.sin(dLat/2)**2 + Math.cos(rad(a.latitude)) * Math.cos(rad(b.latitude)) * Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+// ---------- Google Places API (New) ----------
+async function placesFetch(key, url, opts, fieldMask) {
+  const res = await fetch(url, { ...opts, headers: { "Content-Type": "application/json", "X-Goog-Api-Key": key, ...(fieldMask ? { "X-Goog-FieldMask": fieldMask } : {}) } });
+  if (!res.ok) throw new Error(`Places API ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return res.json();
+}
+
+async function textSearch(key, query, center, radius) {
+  const body = { textQuery: query, languageCode: "zh-TW", pageSize: 20 };
+  if (center) body.locationBias = { circle: { center, radius } };
+  const data = await placesFetch(key, "https://places.googleapis.com/v1/places:searchText",
+    { method: "POST", body: JSON.stringify(body) },
+    "places.id,places.displayName,places.location,places.formattedAddress,places.primaryTypeDisplayName,places.businessStatus");
+  return data.places || [];
+}
+
+let sessionToken = crypto.randomUUID();   // 同一次「輸入→選定」共用，Google 會合併計費
+async function autocomplete(key, input) {
+  const data = await placesFetch(key, "https://places.googleapis.com/v1/places:autocomplete",
+    { method: "POST", body: JSON.stringify({ input, languageCode: "zh-TW", regionCode: "tw", includedRegionCodes: ["tw"], sessionToken }) });
+  return (data.suggestions || []).map(s => s.placePrediction).filter(Boolean).slice(0, 5);
+}
+async function placeLocation(key, placeId) {
+  const data = await placesFetch(key, `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}?languageCode=zh-TW&sessionToken=${sessionToken}`,
+    { method: "GET" }, "id,displayName,location");
+  sessionToken = crypto.randomUUID();
+  return data.location;
+}
+
+// ---------- 分類 ----------
+const isCarLot = p => {
+  if (p.businessStatus && p.businessStatus !== "OPERATIONAL") return false;
+  const name = p.displayName?.text || "", type = p.primaryTypeDisplayName?.text || "";
+  return !/機車|電單車|摩托/.test(name + type);
+};
+const operatorOf = p => {
+  const name = p.displayName?.text || "";
+  if (NOT_A_LOT.test(name)) return undefined;
+  return OPERATORS.find(op => op.re.test(name))?.label;
+};
+
+async function findFree(key, center) {
+  if (key === "demo") return demoData(center);
+  const queries = OPERATORS.flatMap(op => op.queries);
+  const batches = await Promise.all(queries.map(q => textSearch(key, q, center, RADIUS_M)));
+  const seen = new Map();
+  for (const p of batches.flat()) {
+    if (!seen.has(p.id) && isCarLot(p) && operatorOf(p)) seen.set(p.id, p);
+  }
+  return [...seen.values()]
+    .map(p => ({ ...p, op: operatorOf(p), dist: haversine(center, p.location) }))
+    .filter(p => p.dist <= MAX_DIST_M)
+    .sort((a, b) => a.dist - b.dist)
+    .slice(0, MAX_RESULTS);
+}
+
+function demoData(c) {
+  const mk = (id, n, dLat, dLng) => ({ id, displayName: { text: n }, formattedAddress: "（示範資料）",
+    location: { latitude: c.latitude + dLat, longitude: c.longitude + dLng } });
+  return [mk("1", "嘟嘟房停車場-南港展覽館站", .001, .001), mk("2", "台灣聯通停車場-昆陽場", .006, -.004),
+          mk("3", "嘟嘟房停車場-南港全聯站", -.009, .003)]
+    .map(p => ({ ...p, op: operatorOf(p), dist: haversine(c, p.location) })).sort((a, b) => a.dist - b.dist);
+}
+
+// ---------- 地圖 ----------
+let map, layer, markers = [];
+function drawMap(center, places) {
+  $("map").classList.remove("hidden");
+  if (!map) {
+    map = L.map("map", { zoomControl: true });
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+  }
+  map.invalidateSize();
+  if (layer) layer.remove();
+  layer = L.layerGroup().addTo(map);
+  const pts = [[center.latitude, center.longitude]];
+  L.circleMarker(pts[0], { radius: 9, color: "#fff", weight: 3, fillColor: "#1a73e8", fillOpacity: 1 }).addTo(layer);
+  markers = places.map((p, i) => {
+    const ll = [p.location.latitude, p.location.longitude];
+    pts.push(ll);
+    const m = L.marker(ll, { icon: L.divIcon({ className: "", html: `<div class="pin" id="pin${i}">${i + 1}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] }) }).addTo(layer);
+    m.on("click", () => highlight(i, true));
+    return m;
+  });
+  map.fitBounds(pts, { padding: [28, 28], maxZoom: 17 });
+}
+function highlight(i, scroll) {
+  document.querySelectorAll(".card").forEach((c, j) => c.classList.toggle("hl", i === j));
+  document.querySelectorAll(".pin").forEach((c, j) => c.classList.toggle("hl", i === j));
+  if (scroll) document.querySelectorAll(".card")[i]?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function render(center, places, label) {
+  const list = $("list");
+  if (!places.length) {
+    list.innerHTML = "";
+    drawMap(center, []);
+    $("status").textContent = `${label}${MAX_DIST_M / 1000} km 內找不到嘟嘟房／聯通／24TPS 站點。`;
+    return;
+  }
+  $("status").textContent = `${label}最近的 ${places.length} 個免費站`;
+  list.innerHTML = places.map((p, i) => {
+    const url = `https://www.google.com/maps/dir/?api=1&destination=${p.location.latitude},${p.location.longitude}&destination_place_id=${encodeURIComponent(p.id)}`;
+    return `<div class="card" data-i="${i}">
+      <div class="num">${i + 1}</div>
+      <div class="info"><div class="name">${esc(p.displayName.text)}</div>
+        <div class="sub"><span class="tag">${esc(p.op)}</span>${CHECK_FIRST.test(p.displayName.text) ? '<span class="tag">⚠️ 需確認是否適用</span>' : ""}${esc(p.formattedAddress || "")}</div></div>
+      <div class="dist">${fmtDist(p.dist)}</div>
+      <a class="nav" href="${url}" target="_blank" rel="noopener">導航</a></div>`;
+  }).join("");
+  list.querySelectorAll(".card").forEach(c => c.addEventListener("click", e => {
+    if (e.target.closest("a")) return;
+    const i = +c.dataset.i; highlight(i, false); map.panTo(markers[i].getLatLng());
+  }));
+  drawMap(center, places);
+}
+
+async function run(getCenter, label) {
+  const key = store.get("placesKey");
+  $("status").textContent = "搜尋中…";
+  $("list").innerHTML = "";
+  hideSugg();
+  try {
+    const center = await getCenter(key);
+    render(center, await findFree(key, center), label);
+  } catch (e) {
+    $("status").textContent = "失敗：" + e.message;
+  }
+}
+
+const here = () => new Promise((ok, no) => navigator.geolocation
+  ? navigator.geolocation.getCurrentPosition(
+      p => ok({ latitude: p.coords.latitude, longitude: p.coords.longitude }),
+      e => no(new Error("無法取得定位：" + e.message)), { enableHighAccuracy: true, timeout: 10000 })
+  : no(new Error("此瀏覽器不支援定位")));
+
+// ---------- 目的地輸入：自動建議 ----------
+let selected = null, suggTimer = 0, suggSeq = 0;
+function hideSugg() { $("sugg").classList.add("hidden"); $("sugg").innerHTML = ""; }
+
+async function onType() {
+  selected = null;
+  const q = $("dest").value.trim(), key = store.get("placesKey");
+  clearTimeout(suggTimer);
+  if (!q || key === "demo") return hideSugg();
+  const seq = ++suggSeq;
+  suggTimer = setTimeout(async () => {
+    try {
+      const items = await autocomplete(key, q);
+      if (seq !== suggSeq) return;              // 已有更新的輸入，丟掉舊結果
+      $("sugg").innerHTML = items.map((s, i) =>
+        `<div data-i="${i}"><div>${esc(s.structuredFormat?.mainText?.text || s.text.text)}</div><div class="s2">${esc(s.structuredFormat?.secondaryText?.text || "")}</div></div>`).join("");
+      $("sugg").classList.toggle("hidden", !items.length);
+      $("sugg").querySelectorAll("div[data-i]").forEach(d => d.addEventListener("click", () => {
+        const s = items[+d.dataset.i];
+        selected = { placeId: s.placeId };
+        $("dest").value = s.structuredFormat?.mainText?.text || s.text.text;
+        run(destCenter, "目的地附近");
+      }));
+    } catch (e) { hideSugg(); $("status").textContent = "建議載入失敗：" + e.message; }
+  }, 250);
+}
+
+const destCenter = async key => {
+  if (selected) return placeLocation(key, selected.placeId);
+  const q = $("dest").value.trim();
+  if (!q) throw new Error("請先輸入目的地");
+  if (key === "demo") return { latitude: 25.0555, longitude: 121.617 };
+  const [p] = await textSearch(key, q, null, 0);
+  if (!p) throw new Error("找不到這個目的地");
+  return p.location;
+};
+
+// ---------- 語音輸入 ----------
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (!SR) $("mic").classList.add("hidden");
+$("mic").onclick = () => {
+  const rec = new SR();
+  rec.lang = "zh-TW"; rec.interimResults = false; rec.maxAlternatives = 1;
+  $("mic").classList.add("on");
+  $("status").textContent = "請說出目的地…";
+  rec.onresult = e => { $("dest").value = e.results[0][0].transcript; $("status").textContent = ""; onType(); };
+  rec.onerror = e => { $("status").textContent = "語音辨識失敗：" + e.error + (e.error === "not-allowed" ? "（請允許麥克風權限）" : ""); };
+  rec.onend = () => $("mic").classList.remove("on");
+  rec.start();
+};
+
+// ---------- 初始化 ----------
+function showApp() {
+  const hasKey = !!store.get("placesKey");
+  $("setup").classList.toggle("hidden", hasKey);
+  $("app").classList.toggle("hidden", !hasKey);
+}
+$("saveKey").onclick = () => { const v = $("key").value.trim(); if (v) { store.set("placesKey", v); showApp(); } };
+$("resetKey").onclick = () => { store.del("placesKey"); showApp(); };
+$("near").onclick = () => run(() => here(), "你附近");
+$("byDest").onclick = () => run(destCenter, "目的地附近");
+$("dest").addEventListener("input", onType);
+$("dest").addEventListener("keydown", e => { if (e.key === "Enter") $("byDest").click(); });
+document.addEventListener("click", e => { if (!e.target.closest(".search")) hideSugg(); });
+showApp();
+</script>
+</body>
+</html>
