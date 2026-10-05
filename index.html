@@ -49,6 +49,9 @@
   .opts label { display:flex; align-items:center; gap:8px; font-size:15px; }
   .opts input { flex:none; width:20px; height:20px; padding:0; accent-color:var(--accent); }
   #status { color:var(--muted); margin:8px 0; min-height:1.4em; }
+  button.vac { margin-top:8px; padding:6px 12px; font-size:13px; font-weight:600; background:transparent; color:var(--accent); border:1px solid var(--accent); border-radius:8px; }
+  body:not(.android) button.vac { display:none; }      /* 開啟其他 App 的做法只有 Android 能用 */
+  #toast { position:fixed; left:16px; right:16px; bottom:90px; z-index:3000; background:#1a1d21; color:#fff; padding:12px 16px; border-radius:12px; font-size:14px; text-align:center; box-shadow:0 6px 20px rgba(0,0,0,.35); }
   #navbar { position:fixed; left:0; right:0; bottom:0; z-index:2000; display:flex; align-items:center; gap:10px; padding:12px 16px calc(12px + env(safe-area-inset-bottom)); background:#14532d; color:#fff; box-shadow:0 -4px 16px rgba(0,0,0,.3); }
   #navbar .nb-text { flex:1; min-width:0; font-size:14px; line-height:1.35; }
   #navbar .nb-text span { opacity:.8; font-size:12px; }
@@ -94,6 +97,7 @@
   </div>
 </main>
 <div id="navbar" class="hidden"></div>
+<div id="toast" class="hidden"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -201,6 +205,29 @@ function renderView() {
   const { center, label, all } = lastResult;
   lastView = applyView(all);
   render(center, lastView.shown, label, lastView.filteredOut);
+}
+
+// ---------- 看空位：借用「停車大聲公」(ACER ITS) 的即時剩餘車位 ----------
+// 它沒有開放 API，也沒有能直接跳到某個停車場的連結，所以只能：複製站名關鍵字 → 開啟 App → 使用者貼上搜尋。
+const PKLOT_PKG = "com.alfred.parkinglot";
+const PKLOT_PLAY = `https://play.google.com/store/apps/details?id=${PKLOT_PKG}`;
+if (/Android/i.test(navigator.userAgent)) document.body.classList.add("android");
+// Google 的店名是「嘟嘟房停車場-南港展覽館站」，停車大聲公叫「嘟嘟房南港展覽館站」，所以只留站名本身比較容易搜到
+const searchKeyword = p => (nameOf(p) || "")
+  .replace(/[（(](汽車|機車)?入口[）)]/g, "")
+  .replace(/嘟嘟房|台灣聯通|24TPS|永固便利|永固/gi, "").replace(/停車場|停車/g, "")
+  .replace(/[()（）\-－\s。]/g, "").replace(/站$/, "") || nameOf(p);
+let toastTimer = 0;
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.remove("hidden");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.add("hidden"), 5000);
+}
+async function checkVacancy(p) {
+  const kw = searchKeyword(p);
+  try { await navigator.clipboard.writeText(kw); toast(`已複製「${kw}」，到停車大聲公的搜尋框貼上即可`); }
+  catch { toast(`請在停車大聲公搜尋「${kw}」`); }
+  // 開啟 App；沒安裝的話，Chrome 會改開 Play 商店頁面
+  setTimeout(() => { location.href = `intent://#Intent;package=${PKLOT_PKG};S.browser_fallback_url=${encodeURIComponent(PKLOT_PLAY)};end`; }, 700);
 }
 
 // ---------- 備案導航：到了發現滿了 → 一鍵換下一個 ----------
@@ -313,11 +340,13 @@ function render(center, places, label, hidden = 0) {
     return `<div class="card" data-i="${i}">
       <div class="num">${i + 1}</div>
       <div class="info"><div class="name">${esc(p.displayName.text)}</div>
-        <div class="sub"><span class="tag">${esc(p.op)}</span>${full[p.id] ? '<span class="tag">🈵 剛標記為滿</span>' : ""}${openTag(p)}${p.rating ? `<span class="tag">⭐ ${p.rating}（${p.userRatingCount || 0}）</span>` : ""}${CHECK_FIRST.test(p.displayName.text) ? '<span class="tag">⚠️ 需確認是否適用</span>' : ""}${esc(p.formattedAddress || "")}</div></div>
+        <div class="sub"><span class="tag">${esc(p.op)}</span>${full[p.id] ? '<span class="tag">🈵 剛標記為滿</span>' : ""}${openTag(p)}${p.rating ? `<span class="tag">⭐ ${p.rating}（${p.userRatingCount || 0}）</span>` : ""}${CHECK_FIRST.test(p.displayName.text) ? '<span class="tag">⚠️ 需確認是否適用</span>' : ""}${esc(p.formattedAddress || "")}</div>
+        <button class="vac" type="button">看空位（參考）</button></div>
       <div class="dist">${fmtDist(p.dist)}</div>
       <a class="nav" href="${url}" target="_blank" rel="noopener">導航</a></div>`;
   }).join("");
   list.querySelectorAll("a.nav").forEach(a => a.addEventListener("click", () => startNav(+a.closest(".card").dataset.i)));
+  list.querySelectorAll("button.vac").forEach(b => b.addEventListener("click", () => checkVacancy(places[+b.closest(".card").dataset.i])));
   list.querySelectorAll(".card").forEach(c => c.addEventListener("click", e => {
     if (e.target.closest("a")) return;
     const i = +c.dataset.i; highlight(i, false); map.panTo(markers[i].getLatLng());
